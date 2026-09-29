@@ -1,124 +1,520 @@
-Modeling
-A two-part time-series pipeline on the UCI Air Quality dataset: a SARIMAX model for the expected pollution level, and a GARCH model layered on its residuals for the time-varying uncertainty around that expectation.
+# Urban Air Quality Volatility & Pollution Shock Modeling
 
-The point isn't just "forecast pollution." It's to produce a dynamic confidence interval — one that widens right after a real atmospheric shock and narrows again as conditions settle — because prediction errors in this system are not uniformly sized. They cluster, the same way volatility clusters in financial markets after a shock.
+A two-stage time-series forecasting pipeline for modeling **urban air pollution levels and time-varying uncertainty** using the UCI Air Quality dataset.
 
-Expected pollution is level 5 — but a shock just hit, volatility is clustering, so the 95% interval right now is 3 to 9, not the usual 4 to 6.
+The project combines:
 
-Headline results
-Metric	Value
-PCA composite factor (PC1)	82.87% of variance across 4 gases, loadings 0.47–0.52
-Mean model	SARIMAX(2,0,3) + Fourier(3 daily, 2 weekly) + temperature, AIC 17,882.0
-Stationarity (ADF on PC1)	statistic −9.02, p < .0001 → stationary, d=0
-One-step-ahead RMSE	0.676 vs 0.915 naive (26% error reduction)
-Residual diagnostics	Ljung-Box(L1) p=0.83 · Prob(H) < .01 · kurtosis 7.16
-GARCH(1,1) persistence	α=0.051, β=0.932, α+β = 0.983
-GJR-GARCH asymmetry	γ = −0.088, preferred by AIC (56,181 vs 56,393)
-Conditional volatility range	0.461 – 1.005 (2.18×) over the test window
-95% CI coverage	Static 93.8% · GARCH 93.9% · GJR 93.7%
-The honest headline
-GARCH does not improve average interval coverage. Static, GARCH, and GJR all land within 0.2 points of each other (93.7–93.9%), and mean interval width barely differs. A constant-width interval can match average coverage essentially by construction, so that number proves nothing on its own — and this repo reports it that way rather than burying it.
+* **PCA** to construct a composite pollution factor
+* **SARIMAX** to model expected pollution levels
+* **GARCH / GJR-GARCH** to model time-varying forecast uncertainty
+* **Rolling one-step-ahead forecasting** to evaluate the models under realistic deployment conditions
 
-What GARCH does buy is conditional accuracy — being right about when uncertainty is elevated:
+The key idea is that pollution forecast errors are **not constant over time**. After an atmospheric shock, uncertainty can increase substantially and then gradually decline as conditions stabilize.
 
-Conditional volatility swings 2.18× across the test window (0.461 → 1.005).
-At the single largest test-set shock (2005-03-24 19:00, actual 4.82 vs fitted 1.57), GARCH σ hits its test-period maximum the very next hour, then decays gradually over the following hours — textbook post-shock volatility clustering.
-The static interval sits flat at 0.69 throughout that entire episode.
-That distinction — marginal calibration is a tie, conditional calibration is not — is the actual finding, and it's the part worth discussing.
+---
 
-Run the six stages in order. Each reads the previous stage's output from data/ and writes its own:
+## Key Finding
 
-python -m src.ingest          # fetch + clean  -> data/processed/air_quality_clean.parquet
-python -m src.outliers        # glitch filter  -> air_quality_outliers_handled.parquet
-python -m src.impute          # dual imputation-> air_quality_imputed.parquet
-python -m src.features        # Fourier + PCA  -> air_quality_features.parquet
-python -m src.mean_model      # SARIMAX        -> mean_model_residuals.parquet
-python -m src.variance_model  # GARCH + report -> variance_model_output.parquet
-Stage 1 downloads the dataset automatically via ucimlrepo — no manual download, no API key, no auth. Every stage prints its own diagnostics to stdout.
+The project distinguishes between **average interval calibration** and **conditional uncertainty estimation**.
 
-Runtime note: src.mean_model takes several minutes — it fits 15 candidate SARIMAX orders by maximum likelihood over 8,517 rows with 11 exogenous regressors. Every other stage is seconds.
+Although static, GARCH, and GJR-GARCH intervals achieve very similar overall 95% coverage, GARCH provides information about **when uncertainty is elevated**.
 
-The data
-UCI Air Quality dataset (id=360) — a multi-sensor device on a road in a polluted Italian city, hourly readings.
+During the test period:
 
-Property	Verified value
-Rows	9,357 hourly observations
-Range	2004-03-10 18:00 → 2005-04-04 14:00
-Time grid	Fully continuous — zero missing timestamps
-Missing-value encoding	-200 sentinel
-Reference analyzers missing	CO/NOx/NO2 (GT): ~17.5–18%
-Sensor + weather channels missing	PT08.S*/T/RH/AH: 3.91%, in 16 contiguous outages of 1–76h
-Two things here contradict the dataset's own published description, both verified directly against the data rather than assumed:
+* Conditional volatility varied by **2.18×**, from 0.461 to 1.005.
+* Following the largest test-set pollution shock, GARCH volatility reached its maximum during the following hour and then gradually declined.
+* A static confidence interval remained unchanged throughout the same episode.
 
-The date range. UCI's page says the data runs to February 2005. The actual final timestamp is 2005-04-04.
-The date format. UCI's page describes DD/MM/YYYY. What ucimlrepo actually delivers is M/D/YYYY. Parsing with the documented format silently discards 61% of rows as unparseable.
-Dropped: NMHC(GT)
-Over 90% missing, in contiguous blocks — that sensor died early and never recovered. It is excluded outright rather than imputed. Imputing a mostly-dead column and then feeding it into PCA would mean PCA's reported explained variance was partly explaining a column reconstructed from the correlations of the other four — circular, and it inflates the headline number instead of measuring anything real.
+Therefore, the main contribution is not improved average coverage, but the ability to represent **time-varying uncertainty following pollution shocks**.
 
-Pipeline
-1 · Ingest & clean — src/ingest.py
-Fetches via ucimlrepo, builds a true DatetimeIndex, replaces the -200 sentinel with NaN, drops NMHC(GT), reindexes onto a continuous hourly grid, and reports per-column missingness.
+---
 
-2 · Outlier detection — src/outliers.py
-Separates hardware glitches (discard) from real pollution events (keep — GARCH needs them).
+## Results
 
-A textbook Hampel filter compares each point to a centered rolling median. That fails badly here: the window spans both a daily peak and trough, so the steepest part of temperature's normal diurnal curve reads as anomalous. This repo instead flags deviation from each point's immediate neighbor-interpolation (t−1, t+1), which is blind to slow cycles but still catches genuine spikes. A run-length check then keeps any deviation persisting beyond 2 hours as a real event.
+| Metric                        |             Result |
+| ----------------------------- | -----------------: |
+| PCA variance explained by PC1 |         **82.87%** |
+| Mean model                    | **SARIMAX(2,0,3)** |
+| One-step RMSE                 |          **0.676** |
+| Naive RMSE                    |          **0.915** |
+| Error reduction               |            **26%** |
+| ADF statistic                 |          **−9.02** |
+| ADF p-value                   |       **< 0.0001** |
+| GARCH persistence α + β       |          **0.983** |
+| GJR-GARCH γ                   |         **−0.088** |
+| Conditional volatility range  |  **0.461 – 1.005** |
+| Static 95% CI coverage        |          **93.8%** |
+| GARCH 95% CI coverage         |          **93.9%** |
+| GJR-GARCH 95% CI coverage     |          **93.7%** |
 
-3 · Dual imputation — src/impute.py
-Short gaps (≤2h): PCHIP (shape-preserving piecewise cubic Hermite) — cannot overshoot the range of its neighbors.
-Long gaps (3h+, up to 76h): IterativeImputer, regressing each channel on the others. T/RH/AH rarely drop out simultaneously with the gas sensors, so they carry real information into the gas columns' long outages.
-Post-clip: all physically non-negative columns clipped at 0.
-4 · Features + PCA — src/features.py
-Fourier harmonics (3 daily, 2 weekly) as exogenous regressors, so the ARIMA terms aren't spent relearning the basic commuter rhythm. Then StandardScaler + PCA over the four true reference concentrations — CO(GT), C6H6(GT), NOx(GT), NO2(GT).
+The SARIMAX model reduced one-step-ahead RMSE from 0.915 to 0.676 compared with the naive baseline, corresponding to a **26% reduction in error**.
 
-Deliberately excluded from PCA: the PT08.S* metal-oxide channels (arbitrary-unit resistance readings, not concentrations — mixing units would make the composite incoherent) and any ozone channel (no O3(GT) ground truth exists; ozone is photochemically produced and often anti-correlated with NOx via titration, so it doesn't share the shared-combustion-source story PC1 is built on).
+---
 
-5 · Mean equation — src/mean_model.py
-ADF test → PC1 is already stationary (d=0). AIC grid search over p,q ∈ 0..3 selects SARIMAX(2,0,3).
+# Dataset
 
-Evaluated on a single held-out 5-week tail window via rolling one-step-ahead forecasts (.append(refit=False) — parameters frozen at the training MLE, only the Kalman state advances as real observations arrive). This is what a deployed system does hourly; it is not an 840-step static forecast from one origin.
+The project uses the **UCI Air Quality Dataset**, containing hourly measurements from a multi-sensor monitoring device located on a polluted road in an Italian city.
 
-6 · Variance equation — src/variance_model.py
-GARCH(1,1) and GJR-GARCH(1,1,1) fit on the SARIMAX residuals via arch. Parameters estimated on in-sample residuals only; test-window conditional variance comes from running the GARCH recursion forward through the realized one-step-ahead residuals, with no re-estimation on test data. Outputs the coverage comparison and the shock case study.
+### Dataset characteristics
 
-Five bugs found by verifying output, not by reading code
-Each of these ran without raising an error and produced plausible-looking numbers. All were caught by checking results against ground truth or physical reality.
+* **9,357 hourly observations**
+* Time range: **2004-03-10 18:00 → 2005-04-04 14:00**
+* Continuous hourly time grid
+* Missing values encoded using `-200`
+* Multiple gas concentration measurements
+* Temperature, relative humidity, and absolute humidity measurements
+* 16 contiguous sensor/weather outages ranging from 1–76 hours
 
-#	Bug	How it surfaced	Fix
-1	61% of rows silently dropped	Parsed range came out 2004-01 → 2005-12, wider than possible; most rows became NaT	UCI's docs say DD/MM/YYYY, the data is M/D/YYYY. Verified against the known 2004-03-10 start.
-2	Outlier filter flagged the weather	~20% of T/RH flagged, clustered at 03:00–06:00 and 14:00–17:00 — the steepest slopes of the daily curve	Rolling-median comparison → neighbor-interpolation deviation. Flags now uniform across hours.
-3	Negative pollution concentrations	CO down to −3.7 mg/m³, NOx to −147 ppb	Cubic spline overshoots near sharp gap edges → switched to PCHIP.
-4	Negative concentrations, again — different cause	82 more negative NOx values (to −99 ppb) survived the PCHIP fix	IterativeImputer's BayesianRidge has no non-negativity constraint → post-imputation clip.
-5	Backtest design starved the variance model	GARCH σ decayed to a flat constant almost immediately, showing nothing	An 840-step static forecast gives GARCH nothing to react to → rolling one-step-ahead. This is what produced the clustering result.
-Bug 4 is the instructive one: bug 3's fix was correct and verified, and the same class of error was still present from an entirely separate cause one stage later.
+`NMHC(GT)` was removed because more than 90% of its observations were missing.
 
-Scope, limitations, and what this project does not claim
-Stated up front rather than left for a reader to find:
+---
 
-One sensor, one city, one year. No spatial cross-section — there is no second station, so nothing here demonstrates spatial spillover.
-No true walk-forward cross-validation. The dataset contains exactly one winter. A walk-forward across seasons would be fiction; it could only show the model fits the one inversion period it already saw. A single held-out tail window is used instead, and labeled as such.
-PC1 explains 82.9%, not the >85% often quoted for this pipeline. Reported as measured.
-GARCH does not predict shocks. Correlation between predicted σ(t) and realized |residual(t)| is 0.101. GARCH forecasts how volatile the near future is given what has already happened — it never claims a shock is coming. That weak correlation is expected, not a defect.
-No automated test suite. Verification here was done by checking each stage's real output against ground truth and physical constraints (documented above and in stdout), not by unit tests.
-9,357 rows is small. This is a methodology demonstration on a fully checkable dataset, not a scale exercise.
-One finding worth flagging
-GJR-GARCH gives γ = −0.088: an unexpectedly high pollution reading raises near-term volatility more than an unexpectedly low one. That is the opposite sign from the equity-market "leverage effect" GJR-GARCH was designed around. It is physically plausible — a positive surprise may signal the onset of a persistent trapping inversion, while a negative surprise is more often a transient gust — but it is reported as a domain-specific empirical result rather than forced to match the financial convention.
+# Methodology
 
-Repository layout
+```text
+                 UCI Air Quality Dataset
+                          │
+                          ▼
+                ┌──────────────────┐
+                │ Ingest & Cleaning │
+                └────────┬─────────┘
+                         │
+                         ▼
+                ┌──────────────────┐
+                │ Outlier Detection │
+                └────────┬─────────┘
+                         │
+                         ▼
+                ┌──────────────────┐
+                │ Dual Imputation  │
+                └────────┬─────────┘
+                         │
+                         ▼
+                ┌──────────────────┐
+                │ Features + PCA   │
+                └────────┬─────────┘
+                         │
+                         ▼
+                ┌──────────────────┐
+                │     SARIMAX      │
+                │  Mean Forecast   │
+                └────────┬─────────┘
+                         │
+                     Residuals
+                         │
+                         ▼
+                ┌──────────────────┐
+                │   GARCH / GJR    │
+                │ Volatility Model │
+                └────────┬─────────┘
+                         │
+                         ▼
+              Dynamic Prediction Intervals
+```
+
+---
+
+## 1. Data Ingestion & Cleaning
+
+`src/ingest.py`
+
+The first stage:
+
+* Downloads the dataset using `ucimlrepo`
+* Constructs a proper `DatetimeIndex`
+* Converts the `-200` missing-value sentinel into `NaN`
+* Removes `NMHC(GT)`
+* Reindexes the dataset onto a continuous hourly grid
+* Reports missingness for each variable
+
+The implementation also verifies the actual timestamp format delivered by the dataset rather than relying blindly on the published description.
+
+---
+
+## 2. Outlier Detection
+
+`src/outliers.py`
+
+A major challenge is distinguishing between:
+
+1. **Hardware glitches**, which should be removed
+2. **Real pollution shocks**, which must be retained because the volatility model needs them
+
+A conventional rolling Hampel filter was found to incorrectly flag normal daily temperature and humidity changes.
+
+Instead, the project compares each observation against an **interpolation between its immediate neighbors**:
+
+```text
+t-1 ───────────── t ───────────── t+1
+          │
+          └── compare actual t
+              with neighbor interpolation
+```
+
+A run-length rule is then used to avoid removing persistent real events.
+
+---
+
+## 3. Dual Imputation
+
+`src/impute.py`
+
+Different missing-gap lengths are treated differently.
+
+### Short gaps
+
+For gaps of **≤ 2 hours**:
+
+**PCHIP — Piecewise Cubic Hermite Interpolation**
+
+PCHIP is used because it preserves the shape of the surrounding observations and avoids the overshooting problem encountered with ordinary cubic splines.
+
+### Long gaps
+
+For gaps of **3 hours or more**:
+
+**IterativeImputer + Bayesian Ridge**
+
+Each variable is estimated using information from the other available channels.
+
+Temperature, relative humidity, and absolute humidity provide useful information during gas-sensor outages.
+
+Finally, physically non-negative variables are clipped at zero.
+
+---
+
+# 4. Feature Engineering & PCA
+
+`src/features.py`
+
+The model incorporates periodic pollution patterns using Fourier terms:
+
+* **3 daily harmonics**
+* **2 weekly harmonics**
+
+These are included as exogenous regressors so the ARIMA component does not need to relearn predictable daily and weekly patterns.
+
+### PCA
+
+PCA is performed on four ground-truth pollutant concentrations:
+
+* `CO(GT)`
+* `C6H6(GT)`
+* `NOx(GT)`
+* `NO2(GT)`
+
+The first principal component explains:
+
+> **82.87% of total variance**
+
+This PC1 becomes the composite pollution factor used by the forecasting pipeline.
+
+Metal-oxide sensor channels are excluded because their measurements are resistance-based arbitrary units rather than concentrations. Ozone is also excluded because there is no corresponding `O3(GT)` ground-truth concentration in the selected reference set.
+
+---
+
+# 5. SARIMAX Mean Model
+
+`src/mean_model.py`
+
+The first modeling stage predicts the **expected pollution level**.
+
+### Stationarity
+
+An Augmented Dickey-Fuller test gives:
+
+```text
+ADF statistic = -9.02
+p-value       < 0.0001
+```
+
+Therefore, PC1 is treated as stationary and:
+
+```text
+d = 0
+```
+
+### Model selection
+
+An AIC-based grid search over:
+
+```text
+p ∈ {0,1,2,3}
+q ∈ {0,1,2,3}
+```
+
+selects:
+
+```text
+SARIMAX(2,0,3)
+```
+
+with Fourier terms and temperature as exogenous variables.
+
+### Evaluation
+
+The model is evaluated on a **held-out five-week tail window** using rolling one-step-ahead forecasts.
+
+The model parameters remain fixed after training while the Kalman state advances as new observations become available.
+
+This better represents how an hourly forecasting system would operate in deployment.
+
+---
+
+# 6. GARCH Volatility Model
+
+`src/variance_model.py`
+
+The residuals from the SARIMAX model are passed into a volatility model.
+
+Two models are evaluated:
+
+* **GARCH(1,1)**
+* **GJR-GARCH(1,1,1)**
+
+The purpose is not to predict the pollution level itself, but to estimate:
+
+> **How uncertain the next prediction is likely to be.**
+
+The GARCH models are fitted only on the in-sample SARIMAX residuals.
+
+During testing, the conditional variance is recursively updated using realized one-step-ahead residuals without re-estimating model parameters on the test set.
+
+---
+
+# Why GARCH?
+
+A conventional forecasting model might assume:
+
+```text
+Prediction uncertainty = constant
+```
+
+But pollution data can behave more like:
+
+```text
+Normal conditions
+      ↓
+Low volatility
+      ↓
+Pollution shock
+      ↓
+High volatility
+      ↓
+Gradual stabilization
+      ↓
+Low volatility
+```
+
+GARCH captures this changing uncertainty.
+
+For example:
+
+```text
+Expected pollution = 5
+
+Static interval:
+    4 ───────────── 6
+
+After a shock:
+
+Dynamic interval:
+    3 ───────────────── 9
+```
+
+The expected value can remain similar while the uncertainty surrounding it changes significantly.
+
+---
+
+# GARCH vs Static Confidence Intervals
+
+The project deliberately avoids claiming that GARCH improves average coverage.
+
+| Interval  | 95% Coverage |
+| --------- | -----------: |
+| Static    |        93.8% |
+| GARCH     |        93.9% |
+| GJR-GARCH |        93.7% |
+
+The difference is extremely small.
+
+The more important result is the **conditional behavior of volatility**.
+
+During the test period:
+
+```text
+Minimum σ = 0.461
+Maximum σ = 1.005
+
+Maximum / Minimum = 2.18×
+```
+
+At the largest test-set shock:
+
+```text
+Date:   2005-03-24 19:00
+Actual: 4.82
+Fitted: 1.57
+```
+
+GARCH volatility reached its test-period maximum during the following hour and then gradually declined, while the static interval remained unchanged.
+
+---
+
+# GJR-GARCH Result
+
+The GJR-GARCH model estimates:
+
+```text
+γ = -0.088
+```
+
+This indicates an asymmetric response of volatility to positive and negative shocks.
+
+Interestingly, the sign is opposite to the traditional financial-market leverage effect.
+
+The project does **not** force this result to match financial-market intuition. Instead, it reports the result as a domain-specific empirical observation that may have a physical interpretation in atmospheric pollution dynamics.
+
+---
+
+# Reproducibility
+
+Clone the repository and install the required dependencies:
+
+```bash
+git clone <repository-url>
+cd <repository-name>
+
+pip install -r requirements.txt
+```
+
+Then run the six pipeline stages sequentially:
+
+```bash
+python -m src.ingest
+python -m src.outliers
+python -m src.impute
+python -m src.features
+python -m src.mean_model
+python -m src.variance_model
+```
+
+Each stage reads the previous stage's output from `data/` and generates the next artifact.
+
+The first stage automatically downloads the UCI dataset, so no manual dataset download or API key is required.
+
+### Runtime
+
+`src.mean_model` is the most computationally expensive stage because it evaluates 15 candidate SARIMAX configurations over thousands of observations with multiple exogenous regressors.
+
+The remaining stages execute comparatively quickly.
+
+---
+
+# Repository Structure
+
+```text
+.
 ├── src/
-│   ├── ingest.py           # Stage 1 — fetch, clean, sentinel handling
-│   ├── outliers.py         # Stage 2 — glitch vs. real-event separation
-│   ├── impute.py           # Stage 3 — PCHIP + IterativeImputer
-│   ├── features.py         # Stage 4 — Fourier terms + PCA
-│   ├── mean_model.py       # Stage 5 — SARIMAX + AIC grid search
-│   └── variance_model.py   # Stage 6 — GARCH / GJR-GARCH + evaluation
-├── PLAN.md                 # Design decisions, made before implementation
-├── REPORT.md               # Full results writeup
-├── INTERVIEW_PREP.md       # Plain-language walkthrough + anticipated Q&A
-└── requirements.txt        # Pinned, verified-working versions
-data/ is gitignored — every artifact in it is regenerated by rerunning the pipeline, and stage 1 fetches the source data automatically.
+│   ├── ingest.py
+│   ├── outliers.py
+│   ├── impute.py
+│   ├── features.py
+│   ├── mean_model.py
+│   └── variance_model.py
+│
+├── PLAN.md
+├── REPORT.md
+├── INTERVIEW_PREP.md
+├── requirements.txt
+└── data/
+```
 
-Environment
-Python 3.12.10, numpy 2.5.1, pandas 3.0.5. Exact versions in requirements.txt.
+### Source files
 
-pmdarima — the conventional auto-ARIMA package, and what most tutorials for this pipeline reach for — is not used: it is incompatible with numpy ≥ 2.0 due to a binary mismatch in its compiled extensions. src/mean_model.py implements the equivalent AIC grid search directly against statsmodels, which is what auto_arima does internally anyway.
+| File                | Purpose                                               |
+| ------------------- | ----------------------------------------------------- |
+| `ingest.py`         | Dataset download, cleaning and timestamp handling     |
+| `outliers.py`       | Hardware-glitch detection and real-event preservation |
+| `impute.py`         | PCHIP and IterativeImputer                            |
+| `features.py`       | Fourier features and PCA                              |
+| `mean_model.py`     | SARIMAX model and AIC search                          |
+| `variance_model.py` | GARCH/GJR-GARCH and evaluation                        |
+
+The `data/` directory contains generated artifacts and is intentionally excluded from version control.
+
+---
+
+# Important Implementation Details
+
+The project uncovered several issues that produced plausible-looking but incorrect results.
+
+### 1. Timestamp parsing
+
+Using the documented date format caused approximately **61% of rows to be discarded** because the delivered data used a different date representation.
+
+### 2. Outlier detection
+
+A standard rolling-median filter incorrectly classified normal daily weather cycles as anomalies.
+
+### 3. Spline interpolation
+
+Cubic spline interpolation generated physically impossible negative pollution concentrations.
+
+### 4. Iterative imputation
+
+Even after switching to PCHIP, Bayesian Ridge imputation generated additional negative concentration estimates. A physical non-negativity constraint was therefore applied after imputation.
+
+### 5. Backtesting design
+
+An 840-step static forecast prevented the GARCH model from reacting to new shocks.
+
+Switching to rolling one-step-ahead forecasting revealed the intended volatility-clustering behavior.
+
+---
+
+# Limitations
+
+This project is intended as a **methodology demonstration**, not a universal air-quality forecasting system.
+
+### Dataset limitations
+
+* One monitoring station
+* One city
+* Approximately one year of observations
+* No spatial cross-section
+
+### Validation limitations
+
+* A single held-out tail window is used
+* There is only one winter period
+* Full seasonal walk-forward validation is therefore not possible
+
+### Modeling limitations
+
+* GARCH does not predict when a pollution shock will occur
+* Correlation between predicted volatility and realized absolute residuals is only **0.101**
+* The dataset contains only **9,357 observations**
+* No automated unit-test suite is currently included
+
+These limitations are explicitly treated as part of the project's methodology rather than hidden from the results.
+
+---
+
+# Technical Stack
+
+```text
+Python 3.12
+│
+├── pandas
+├── NumPy
+├── SciPy
+├── scikit-learn
+├── statsmodels
+├── arch
+├── ucimlrepo
+└── matplotlib
+```
+
+The project uses a direct AIC grid search with `statsmodels` instead of `pmdarima`, because `pmdarima` is incompatible with NumPy ≥ 2.0 due to compiled-extension issues.
+
