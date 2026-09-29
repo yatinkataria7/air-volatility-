@@ -1,0 +1,16 @@
+# Verified working on Python 3.12.10 (Windows). Versions are the ones this pipeline was
+# actually developed and run against, not aspirational minimums.
+#
+# NOTE: pmdarima is deliberately NOT included. It is the conventional choice for auto-ARIMA
+# order selection, but it is incompatible with numpy>=2.0 (binary mismatch in its compiled
+# extensions). src/mean_model.py implements the equivalent AIC grid search directly against
+# statsmodels instead. See PLAN.md section "Corrections agreed before starting".
+
+ucimlrepo==0.0.7
+pandas==3.0.5
+numpy==2.5.1
+scipy==1.18.0
+scikit-learn==1.9.0
+statsmodels==0.15.0
+arch==8.0.0
+pyarrow==25.0.0
